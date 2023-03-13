@@ -1,0 +1,153 @@
+---
+title: "Integrating two Sox17-expressing scRNAseq datasets"
+output:
+  html_document:
+    df_print: paged
+---
+
+This notebook contains scripts to integrate the GFP+ cells data and TdTomato+ cells data.
+
+***
+
+After quality control filtration, two datasets are ready to be integrated. 
+
+```{r environment setup, include=FALSE}
+all_times <- list() 
+knitr::knit_hooks$set(time_it = local({
+  now <- NULL
+  function(before, options) {
+    if(before){
+      # report the current time before each chunk
+      now <<- Sys.time()
+    } else {
+      # calculate the time difference after a chunk
+      res <- difftime(Sys.time(), now, units = "secs")
+      # store the reported time it takes to run each chunk to all_time object
+      all_times[[options$label]] <<- res
+    }
+  }
+}))
+knitr::opts_chunk$set(
+  # to reformat all R source code in several aspects such as adding spaces around most operators, indenting the code properly and replacing the assignment operator = into <-
+  tidy = TRUE,
+  # to set cutoff for the width of output text
+  tidy.opts = list (width.cutoff = 95),
+  message = FALSE,
+  warning = FALSE,
+  time_it = TRUE
+)
+```
+
+```{r initiate libraries}
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(ggplot2)
+```
+
+```{r load processed data}
+sox17gfp <- readRDS("output/sox17gfp_nodoublet.rds")
+sox17tdtomato <- readRDS("output/sox17tdtomato_nodoublet.rds")
+```
+
+```{r merge datasets}
+sox17.merge <- merge(sox17gfp, y = sox17tdtomato, add.cell.ids = c("gfp","tdtomato"), project = "sox17")
+```
+
+By default, the merging function will only concatenate two Seurat objects based on the raw count tracies, erasing any previously normalized and scaled data matrices. 
+
+```{r split object}
+sox17.list <- SplitObject(sox17.merge, split.by = "orig.ident")
+sox17.list <- lapply(X= sox17.list, FUN = SCTransform)
+```
+
+```{r find integration features}
+features <- SelectIntegrationFeatures(object.list = sox17.list, nfeatures = 3000)
+```
+
+```{r prep integration}
+sox17.list <- PrepSCTIntegration(object.list = sox17.list, anchor.features = features)
+```
+
+```{r find anchor}
+sox17.anchors <- FindIntegrationAnchors(object.list = sox17.list, normalization.method = "SCT", anchor.features = features)
+```
+
+```{r integrate data} 
+all_gene <- Reduce(intersect, lapply(sox17.list, rownames))
+sox17.integrated.sct <- IntegrateData(anchorset = sox17.anchors, normalization.method = "SCT", features.to.integrate = all_gene)
+```
+
+```{r dimensional reduction}
+sox17.integrated.sct <- RunPCA(sox17.integrated.sct, verbose = FALSE)
+sox17.integrated.sct <- RunUMAP(sox17.integrated.sct, reduction = "pca", dims = 1:30)
+sox17.integrated.sct <- FindNeighbors(sox17.integrated.sct, dims = 1:30, verbose = FALSE)
+sox17.integrated.sct <- FindClusters(sox17.integrated.sct, verbose = FALSE)
+```
+
+```{r visualize integrated data}
+p1 <- DimPlot(sox17.integrated.sct, reduction = "umap", group.by = "orig.ident", pt.size = 0.5, cols = c("#00BFC4","#F8766D")) + labs(title = "Dataset-based colors")
+p2 <- DimPlot(sox17.integrated.sct, reduction = "umap", group.by = "seurat_clusters", pt.size = 0.5, label = TRUE,repel = TRUE) + labs(title = "Cluster-based colors") + NoLegend()
+p1 + p2
+
+DimPlot(sox17.integrated.sct, reduction = "umap", label = TRUE, pt.size = 0.5)
+```
+
+```{r save dataset}
+saveRDS(sox17.integrated.sct, file = "output/sox17_integrated_allgenes.rds")
+```
+
+# Cell type markers
+
+```{r}
+DefaultAssay(sox17.integrated.sct) <- "integrated"
+```
+
+```{r DE analysis using LR test}
+all_markers_LR <- FindAllMarkers(sox17.integrated.sct, test.use = "LR", latent.vars = "orig.ident", only.pos = TRUE, min.pct = 0.25, min.diff.pct = 0.25)
+write.csv(all_markers_LR, file = "output/all_markers_LR_integrated.csv")
+```
+
+# Name cell clusters
+ 
+```{r}
+new.cluster.ids <- c("Endothelial cell 1","Erythroblast","Endothelial cell 2","Erythroid 2","Endothelial cell 3", "Erythroid 3" ,"Hemangioblast", "Erythroid 4", "HE", "Endoderm 1", "Erythroid 1", "Neural progenitor", "Endoderm 2", "HSPC", "Endocardium", "Liver sinusoidal EC", "Lymphocyte", "Endoderm 3", "Proerythroblast")
+names(new.cluster.ids) <- levels(sox17.integrated.sct)
+sox17.integrated.sct <- RenameIdents(sox17.integrated.sct, new.cluster.ids)
+
+#Figure_2B
+DimPlot(sox17.integrated.sct, reduction = "umap", label = FALSE, pt.size = 1.5) + labs(title = "Sox17-expressing lineages")
+```
+
+# Dot plot of marker genes 
+
+```{r}
+endothelial_markers <- c("Pecam1","Eng","Hand2","Etv2","Vwa1","Hoxb7","Oit3","Gja5")
+endodermal_markers <- c("Epcam","Cldn6","Krt19", "Cdx2","Bmp7","Afp")
+hematopoietic_markers <- c("Gata1","Itga2b","Hba-a1","Hesx1","Plk1","Plek2","Ptprc")
+neural_markers <- c("Sox3","Sox1","Nkx6-1")
+marker_genes <- list("Neural" = neural_markers, "Endodermal" = endodermal_markers, "Endothelial" = endothelial_markers, "Hematopoietic" = hematopoietic_markers) 
+levels(sox17.integrated.sct) <- c("Neural progenitor","Endoderm 3","Endoderm 2","Endoderm 1","Endocardium", "Hemangioblast","Endothelial cell 1","Endothelial cell 2","Endothelial cell 3","Liver sinusoidal EC","HE","HSPC","Proerythroblast","Erythroblast", "Erythroid 4","Erythroid 3","Erythroid 2","Erythroid 1","Lymphocyte")
+
+#Figure_2C
+
+DotPlot(sox17.integrated.sct, features = marker_genes, cols = "Spectral") + theme(axis.text.x = element_text(angle = 90)) 
+```
+
+# Subset
+
+```{r}
+sox17.integrated.sct <- readRDS("output/sox17_integrated.rds")
+```
+
+
+```{r subsets of trajectories}
+sox17.integrated.endothelium <- sox17.integrated.sct[, sox17.integrated.sct$seurat_clusters %in% c("0","2","4","6","7","8","15")]
+
+sox17.integrated.endoderm <- sox17.integrated.sct[, sox17.integrated.sct$seurat_clusters %in% c("9","17","12")]
+```
+
+```{r}
+saveRDS(sox17.integrated.endothelium, file = "output/sox17_integrated_endothelium.rds")
+saveRDS(sox17.integrated.endoderm, file = "output/sox17_integrated_endoderm.rds")
+```

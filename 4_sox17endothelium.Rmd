@@ -1,0 +1,136 @@
+---
+title: "Analyzing endothelium subset of the Sox17 integrated dataset"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r environment setup, include=FALSE}
+all_times <- list() 
+knitr::knit_hooks$set(time_it = local({
+  now <- NULL
+  function(before, options) {
+    if(before){
+      # report the current time before each chunk
+      now <<- Sys.time()
+    } else {
+      # calculate the time difference after a chunk
+      res <- difftime(Sys.time(), now, units = "secs")
+      # store the reported time it takes to run each chunk to all_time object
+      all_times[[options$label]] <<- res
+    }
+  }
+}))
+knitr::opts_chunk$set(
+  # to reformat all R source code in several aspects such as adding spaces around most operators, indenting the code properly and replacing the assignment operator = into <-
+  tidy = TRUE,
+  # to set cutoff for the width of output text
+  tidy.opts = list (width.cutoff = 95),
+  message = FALSE,
+  warning = FALSE,
+  time_it = TRUE
+)
+```
+
+```{r library}
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(ggplot2)
+library(monocle3)
+library(SeuratWrappers)
+library(magrittr)
+library(viridis)
+```
+
+```{r Load dataset}
+endothelium <- readRDS("output/sox17_integrated_endothelium.rds")
+```
+
+```{r Clustering plot}
+DimPlot(endothelium, pt.size = 1) + labs(title = "Sox17-expressing endothelium")
+```
+
+```{r DE analysis}
+DefaultAssay(endothelium) <- "RNA"
+endothelium.marker <- FindAllMarkers(endothelium, only.pos = TRUE, logfc.threshold = 0.25, min.pct = 0.25, min.diff.pct = 0.25)
+write.csv(endothelium.marker, file = "endothelium_markers.csv")
+endothelium.marker %>%
+    group_by(cluster) %>%
+    top_n(n = 10, wt = avg_log2FC) -> endothelium.marker.top10
+write.csv(endothelium.marker.top10, file = "endothelium_markers_top10.csv")
+```
+
+```{r Cell type assignment}
+new.cluster.ids <- c("EC1","EC2","EC3","Hemangioblasts","Erythroid", "HE" ,"LSECs")
+names(new.cluster.ids) <- levels(endothelium)
+endothelium <- RenameIdents(endothelium, new.cluster.ids)
+
+#Figure_3A
+DimPlot(endothelium, reduction = "umap", label = FALSE, pt.size = 1) + labs(title = "Sox17-expressing endothelium")
+```
+
+```{r Markers}
+#Figure_3B
+DotPlot(endothelium, features = c("Oit3","Lyve1","Stab2","Cd44","Igfbp5","Igfbp2","Hbb-bt","Gypa","Alas2","Etv2","Sox17","Hoxa5","Hoxa9","Hoxb7","Hoxb8","Hist1h1b","Hist1h2ae","Dock4","Clec1b","Nid2","Vwa1")) + theme(axis.text.x = element_text(angle = 90))
+
+#Figure_S4A
+FeaturePlot(endothelium, features = c("Hoxa9","Hoxb8","Hoxa7"), pt.size = 0.5)
+#Figure_S4B
+FeaturePlot(endothelium, features = c("Plac1","Nrk"), pt.size = 0.5)
+#Figure_S4C
+FeaturePlot(endothelium, features = c("Cdc20","Cenpa","Ccnb2","Cdk1","Top2a","Aurkb"))
+```
+
+
+```{r Compare HE-EC3}
+HEEC3.markers <- FindMarkers(endothelium, ident.1 = "HE", ident.2 = "EC3", only.pos = TRUE)
+EC3HE.markers <- FindMarkers(endothelium, ident.1 = "EC3", ident.2 = "HE", only.pos = TRUE)
+write.csv(HEEC3.markers, file = "output/HEEC3markers.csv")
+write.csv(EC3HE.markers, file = "output/EC3HEmarkers.csv")
+```
+
+
+```{r RidgePlot EC3HE}
+EC3HEsubset <- endothelium[, endothelium$seurat_clusters %in% c("4","8")]
+
+#Figure_3E
+RidgePlot(EC3HEsubset, features = c("Gja4","Hey1","Efnb2", "Sox17"), ncol = 3, cols = c("#53B400","#A58AFF"))
+
+#Figure_3F
+RidgePlot(EC3HEsubset, features = c("Hspd1","Npm1","Ncl","Lyar"), ncol = 2, cols = c("#53B400","#A58AFF"))
+```
+
+#Pseudotime analysis
+
+```{r Pseudotime order}
+endothelium.cds <- as.cell_data_set(endothelium)
+endothelium.cds <- cluster_cells(endothelium.cds, reduction_method = "UMAP")
+endothelium.cds <- learn_graph(endothelium.cds, use_partition = TRUE)
+
+#root was chosen based on the expression of Etv2 marking hemangioblast population.
+endothelium.cds <- order_cells(endothelium.cds)
+plot_cells(endothelium.cds, color_cells_by = "pseudotime", label_cell_groups = FALSE, label_leaves = FALSE, label_branch_points = FALSE, graph_label_size = 1.5)
+```
+
+## Extract metadata for scVelo
+
+scVelo was ran on Python. Some information from Seurat analysis is needed for RNA velocity visualization. 
+
+
+```{r Cell ID}
+write.csv(Cells(endothelium), file = "output/for_scvelo/Endothelium_cellID_obs.csv", row.names = FALSE)
+```
+
+
+```{r UMAP coordinators}
+write.csv(Embeddings(endothelium, reduction = "umap"), file = "output/for_scvelo/Endothelium_cell_embeddings.csv.csv")
+```
+
+
+```{r Pseudotime values}
+write.csv(pseudotime(endothelium.cds, reduction_method = "UMAP"), file = "output/for_scvelo/Endothelium_pseudotime.csv")
+```
+
+
+

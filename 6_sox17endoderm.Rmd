@@ -1,0 +1,286 @@
+---
+title: "Integrating Sox17 endoderm scRNAseq population with a published hepato-pancreato-biliary dataset"
+output:
+  html_document:
+    df_print: paged
+---
+
+In order to enhance to analysis of hepato-pancreato-biliary trajectory analysis and the performance of pySCENIC on endoderm population, another published scRNAseq dataset was incorporated from Willnow et al., Nature 2021 (https://www.nature.com/articles/s41586-021-03844-1), cells from E8.5, E10.5 and E14.5 were dissected from foregut region and sorted using Tg(Prox1-EGFP) allele. scRNAseq was performed with Smartseq2. (object$orig.ident = Paper2)
+
+ 
+
+```{r environment setup, include=FALSE}
+all_times <- list() 
+knitr::knit_hooks$set(time_it = local({
+  now <- NULL
+  function(before, options) {
+    if(before){
+      # report the current time before each chunk
+      now <<- Sys.time()
+    } else {
+      # calculate the time difference after a chunk
+      res <- difftime(Sys.time(), now, units = "secs")
+      # store the reported time it takes to run each chunk to all_time object
+      all_times[[options$label]] <<- res
+    }
+  }
+}))
+knitr::opts_chunk$set(
+  # to reformat all R source code in several aspects such as adding spaces around most operators, indenting the code properly and replacing the assignment operator = into <-
+  tidy = TRUE,
+  # to set cutoff for the width of output text
+  tidy.opts = list (width.cutoff = 95),
+  message = FALSE,
+  warning = FALSE,
+  time_it = TRUE
+)
+```
+
+```{r initiate libraries}
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(ggplot2)
+```
+
+
+***
+
+Preprocessing of Prox1 endoderm datasets from Willnow et al., Nature 2021 https://www.nature.com/articles/s41586-021-03844-1
+
+***
+
+# input data(GSE144103_E8.5-E14.5_AllCells_genes.csv.gz) was downloaded from GEO
+https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE144103
+
+
+```{r preprocess}
+counts <- read.table(gzfile("data/GSE144103_E8.5-E14.5_AllCells_genes.csv.gz"), sep = ",", header = T)
+
+# make gene names unique
+rownames(counts) = make.names(counts$X, unique=TRUE)
+counts <- counts[,-1]
+
+counts[is.na(counts)] <- 0
+
+#upload metadata (this was also downloaded from GEO , https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE144103)
+
+meta <- read.table("data/GSE144103_series_matrix.txt", sep = "\t", header = T,fill = TRUE)
+rownames(meta)<-meta$Cell_ID
+
+#check if rownames of meta match colnames of counts
+table(rownames(meta) %in% colnames(counts))
+colnames(counts) <- str_replace_all(colnames(counts), "\\.", "-")
+
+obj <- CreateSeuratObject(counts, 
+                          min.cells = 3, 
+                          min.genes = 200, 
+                          project = "Paper2", 
+                          assay = "RNA")
+dim(obj) #19210   346
+obj <- AddMetaData(obj, metadata = meta)
+
+# Visualize QC metrics as a violin plot
+obj[["percent.mt"]] <- PercentageFeatureSet(obj, pattern = "^mt")
+obj[["percent.ribo"]] <- PercentageFeatureSet(obj, pattern = "^Rps|^Rpl")
+
+VlnPlot(obj, features = c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.ribo"), group.by = "developmental_stage",split.by = "tissue",ncol = 4,  pt.size = 0.1, cols = colors)
+
+# Find Variable genes
+obj <- FindVariableFeatures(obj, 
+                            selection.method = "vst", 
+                            nfeatures = 5000)
+# Scale data
+obj <- ScaleData(obj, features = rownames(obj))
+
+# Run PCA
+obj <- RunPCA(obj, features = VariableFeatures(object = obj), npcs = 50)
+
+# Clustering ----
+#
+obj <- FindNeighbors(obj, dims = 1:15)
+obj <- FindClusters(obj, resolution=0.5)
+obj <- RunUMAP(obj, dims = 1:15)
+DimPlot(obj, reduction = "umap", group.by="ident", label = T, pt.size =1) + labs(title=paste0("UMAP by cluster ID, res=", resol)) + scale_color_tableau("Tableau 10")
+  p1[[1]]$layers[[1]]$aes_params$alpha = .5
+  
+DimPlot(obj, reduction = "umap", split.by="developmental_stage", label = T, pt.size = 1) + labs(title=paste0("UMAP, res=", resol))
+
+DimPlot(obj, reduction = "umap", split.by="tissue", label = T, pt.size = 1) + labs(title=paste0("UMAP, res=", resol))
+
+FeaturePlot(obj, reduction = "umap", features="percent.mt", label = F, pt.size =1.5) + labs(title=paste0("UMAP by percent.mt, res=", resol)) + scale_color_viridis(option = "magma") + theme_bw()
+  ggsave(paste0(output_dir, "03-UMAP-percent.mt.png"), width = 4.5, height = 4, units = "in", dpi = 300, scale=1.5)
+
+# Save for downstream integration
+saveRDS(obj, file=paste0(output_dir, "03-obj.scaled.clustered.Rds"))
+obj <-readRDS(paste0(output_dir, "03-obj.scaled.clustered.Rds"))
+
+
+# quick peak at gene of interests
+
+genes <- c('Sp1', 'Klf5', 'Sox17', 'Sox9', 'Egr4', 'Gata4')
+genes <- c('Sox2','Cdx2','Pdx1','Hnf4a','Mnx1','Foxa2','Klf4','Epcam')
+
+FeaturePlot(obj, 
+            reduction = "umap", 
+            features=genes, 
+            ncol = 3,
+            cols = c("#6388b4","#ffae34"),
+            label = F, 
+            pt.size = 1)
+
+
+```
+
+
+
+# Sox17 endoderm analysis
+
+```{r load data}
+sox17endoderm <- readRDS("output/sox17_integrated_endoderm.rds")
+DefaultAssay(sox17endoderm) <- "RNA"
+```
+
+
+```{r recluster}
+sox17endoderm <- SCTransform(sox17endoderm, method = "glmGamPoi", vars.to.regress = "percent.mt", verbose = FALSE)
+sox17endoderm <- RunPCA(sox17endoderm, verbose = FALSE)
+sox17endoderm <- RunUMAP(sox17endoderm, reduction = "pca", dims = 1:30)
+sox17endoderm <- FindNeighbors(sox17endoderm, dims = 1:30, verbose = FALSE)
+sox17endoderm <- FindClusters(sox17endoderm, verbose = FALSE)
+
+#Figure_S6A
+DimPlot(sox17endoderm, label = FALSE)
+```
+
+```{r HPB markers}
+#Figure_S6B
+#Endoderm
+FeaturePlot(sox17endoderm, features = "Epcam", pt.size = 0.5)
+#Biliary
+FeaturePlot(sox17endoderm, features = "Sox17", pt.size = 0.5)
+#Liver
+FeaturePlot(sox17endoderm, features = "Prox1", pt.size = 0.5)
+#Pancreas
+FeaturePlot(sox17endoderm, features = "Epcam", pt.size = 0.5)
+```
+
+
+# Integrating Sox17endoderm and Prox1 endoderm datasets
+
+```{r Load data}
+sox17endoderm <- readRDS("output/sox17_integrated_endoderm.rds")
+DefaultAssay(sox17endoderm) <- "RNA"
+
+prox1endoderm <- readRDS("data/paper2_wilnowetal_2020_Nature/1-EDA/03-obj.scaled.clustered.Rds")
+```
+
+```{r merge datasets}
+endoderm.merge <- merge(sox17endoderm, y = prox1endoderm, add.cell.ids = c("sox17","prox1"), project = "endoderm")
+```
+
+
+```{r QC matrices}
+VlnPlot(endoderm.merge, features = c("nFeature_RNA","nCount_RNA", "percent.mt"), group.by = "orig.ident")
+```
+
+By default, the merging function will only concatenate Seurat objects based on the raw count tracies, erasing any previously normalized and scaled data matrices. 
+
+```{r split object}
+endoderm.list <- SplitObject(endoderm.merge, split.by = "orig.ident")
+endoderm.list <- lapply(X= endoderm.list, FUN = SCTransform)
+```
+
+```{r find integration features}
+features <- SelectIntegrationFeatures(object.list = endoderm.list, nfeatures = 3000)
+```
+
+```{r prep integration}
+endoderm.list <- PrepSCTIntegration(object.list = endoderm.list, anchor.features = features)
+```
+
+```{r find anchor}
+endoderm.anchors <- FindIntegrationAnchors(object.list = endoderm.list, normalization.method = "SCT", anchor.features = features)
+```
+
+```{r integrate data}
+all_gene <- Reduce(intersect, lapply(endoderm.list, rownames))
+endoderm.integrated.sct <- IntegrateData(anchorset = endoderm.anchors, normalization.method = "SCT", features.to.integrate = all_gene)
+```
+
+```{r dimensional reduction}
+endoderm.integrated.sct <- RunPCA(endoderm.integrated.sct, verbose = FALSE)
+endoderm.integrated.sct <- RunUMAP(endoderm.integrated.sct, reduction = "pca", dims = 1:30)
+endoderm.integrated.sct <- FindNeighbors(endoderm.integrated.sct, dims = 1:30, verbose = FALSE)
+endoderm.integrated.sct <- FindClusters(endoderm.integrated.sct, verbose = FALSE)
+```
+
+```{r visualize integrated data}
+#Figure_S6C
+DimPlot(endoderm.integrated.sct, reduction = "umap", group.by = "orig.ident", pt.size = 1) + labs(title = "Integrated endoderm original datasets")
+
+DimPlot(endoderm.integrated.sct, reduction = "umap", group.by = "seurat_clusters", pt.size = 1, label = TRUE,repel = TRUE) + labs(title = "Integrated endoderm cluster") + NoLegend()
+```
+
+```{r save dataset}
+saveRDS(endoderm.integrated.sct, file = "output/endoderm_Sox17_Prox1_integrated_allgenes.rds")
+```
+
+# Conserved cell type markers
+
+
+```{r DE analysis using LR test}
+DefaultAssay(endoderm.integrated.sct) <- "integrated"
+all_markers_LR <- FindAllMarkers(endoderm.integrated.sct, test.use = "LR", latent.vars = "orig.ident", only.pos = TRUE, min.pct = 0.25, min.diff.pct = 0.25)
+write.csv(all_markers_LR, file = "output/endoderm_all_markers_LR_integrated.csv")
+```
+
+
+# Name cell clusters
+ 
+```{r}
+new.cluster.ids <- c("Pancreas","Posterior DE","Anterior DE","Liver","Pancreatic mesenchyme", "Biliary" ,"Islet", "Lung mesenchyme", "Cardiomyocyte", "HPSC")
+names(new.cluster.ids) <- levels(endoderm.integrated.sct)
+endoderm.integrated.sct <- RenameIdents(endoderm.integrated.sct, new.cluster.ids)
+
+#Figure_5A
+DimPlot(endoderm.integrated.sct, reduction = "umap", label = FALSE, pt.size = 1.5) + labs(title = "Integrated endoderm dataset")
+```
+
+```{r DE markers}
+#Figure_5B
+DotPlot(endoderm.integrated.sct, features = c("Tie1","Kdr","Fli1", "Tnnt2","Ttn","Myh6","Prdm1","Fgf9","Foxp2","Rfx6","Isl1","Pax4","Sox17","Onecut1","Flrt3","Col3a1","Col1a1","Islr","Alb","Afp","Fgb","Sox2","Crabp2","Hes5","T","Hoxd9","Cthrc1","Pdx1","Nepn","Ociad2")) + theme(axis.text.x = element_text(angle = 90))
+```
+
+
+```{r Prox1 cell types}
+
+#Figure_S6D
+DimPlot(endoderm.integrated.sct, reduction = "umap", label = FALSE, pt.size = 1.5, group.by = "Sample_source_name_ch1") + labs(title = "Prox1 dataset cell types")
+```
+
+#HPB system analysis 
+
+
+```{r HPB subset}
+endoderm.integrated.sct <- readRDS("output/endoderm_Sox17_Prox1_integrated_allgenes.rds")
+HPB <- endoderm.integrated.sct[, endoderm.integrated.sct$seurat_clusters %in% c("0","3","5")]
+```
+
+```{r DE analysis}
+DefaultAssay(HPB) <- "RNA"
+HPB.markers <- FindAllMarkers(HPB, only.pos = TRUE, logfc.threshold = 0.25, min.pct = 0.25, min.diff.pct = 0.25)
+write.csv(HPB.markers, file = "output/HPB_markers.csv")
+
+HPB.markers %>%
+    group_by(cluster) %>%
+    top_n(n = -20, wt = p_val_adj) -> HPB.markers.top20
+write.csv(HPB.markers.top20, file = "HPB_markers_top20.csv")
+```
+
+
+```{r Heatmap HPB markers}
+#Figure_5C
+DoHeatmap(HPB, features = HPB.markers.top20$gene, slot = "data", angle = 0, hjust = 0.5) + scale_fill_viridis_c() + theme(text = element_text(size = 20))
+```
+
